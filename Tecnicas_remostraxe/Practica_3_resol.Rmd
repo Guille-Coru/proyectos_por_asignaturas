@@ -1,0 +1,201 @@
+---
+title: "Práctica 3: Bootstrap semiparamétrico"
+author: "Grupo 2: Martos Dourado Oscar Portela Vázquez Guillermo"
+date: "TR 2024/2025"
+output:
+  pdf_document: 
+    latex_engine: xelatex
+  html_document: default
+---
+
+<!-- 
+knitr::purl("Practica_3.Rmd", documentation = 2)
+knitr::spin("Practica_3.R", knit = FALSE)
+-->
+
+Esta práctica debe entregarse en formato pdf, 
+incluyendo el código fuente utilizado, las correspondientes salidas 
+y los comentarios (o interpretaciones de los resultados) pertinentes
+(para ello se recomienda emplear RMarkdown, 
+a partir de un fichero *.Rmd* o un fichero *.R* mediante spin,
+que también debe entregarse).
+
+Se debe establecer la semilla igual al número de grupo multiplicado 
+por 10 (también se recomienda hacerlo antes de cada nueva generación de
+números pseudoaleatorios).
+
+En esta práctica se empleará el conjunto de datos `Prestige` de la librería 
+`carData`, considerando como variable respuesta `prestige` (puntuación de 
+ocupaciones obtenidas a partir de una encuesta) y como variables explicativas: 
+`income` (media de ingresos en la ocupación) y `education` (media de los años de 
+educación).
+
+Como punto de partida consideramos un modelo lineal:
+
+```{r}
+library(carData)
+modelo <- lm(prestige ~ income + education, data = Prestige)
+res <- summary(modelo)
+res
+```
+
+### Ejercicio 1
+
+En primer lugar, supongamos que  estamos interesados en realizar inferencias 
+sobre la varianza del error. 
+Podemos estimarla mediante la varianza residual:
+$$\hat{S}_R^2=\frac{1}{n-p-1}\sum\limits_{i=1}^{n}(y_{i}-\hat{y}_{i})^{2}$$
+```{r}
+rvar <- res$sigma^2     # with(modelo, sum(residuals^2)/df.residual)
+rvar
+```
+
+Bajo las hipótesis estructurales del modelo, también podemos obtener estimaciones 
+por intervalo de confianza:
+$$IC_{(1-\alpha )}\left( \sigma ^{2}\right) = 
+\left( \frac{(n-p-1)\hat{S}_R^2}{\chi _{n-p-1,1-\alpha/2}^{2}},
+\frac{(n-p-1)\hat{S}_R^2}{\chi _{n-p-1,\alpha/2}^{2}} \right)$$
+```{r}
+alpha <- 0.05
+rdf <- res$df[2]
+cint <- rdf*rvar/qchisq(c(1 - alpha/2, alpha/2), df = rdf)
+cint
+```
+Alternativamente podríamos emplear bootstrap.
+
+---
+
+Utilizar la función `Boot()` del paquete `car` para obtener una estimación por
+intervalo de confianza de la varianza del error del modelo de regresión 
+lineal (`prestige ~ income + education`) mediante *remuestreo residual*, 
+empleando el método *percentil directo*.
+
+```{r}
+library(tictoc)
+
+library(car)
+
+f_var <- function(obj) {
+  with(obj, 
+       sum(residuals^2)/df.residual)
+}
+
+f_var(modelo) # función que otorga la varianza de un modelo
+
+
+set.seed(20)
+tic()
+mod.boot <- Boot(modelo, method = "residual", f = f_var, labels = "varianza")
+toc()
+
+summary(mod.boot)
+
+round(
+  confint(mod.boot, level = 0.95, type = "perc"),
+  5)
+```
+Obtenemos un intervalo más estrecho.
+### Ejercicio 2
+
+En segundo lugar, al estudiar el efecto de las variables explicativas en el 
+modelo anterior podríamos pensar que no es adecuado asumir un efecto lineal de 
+alguna de ellas. 
+Si generamos los gráficos parciales de residuos obtendríamos:
+
+```{r fig.dim=c(10, 5)}
+library(car)
+crPlots(modelo)
+```
+
+Por ejemplo, podríamos considerar un efecto no lineal de la variable `income` 
+ajustando un modelo aditivo con el paquete `mgcv`:
+
+```{r }
+library(mgcv)
+modelo2 <- gam(prestige ~ s(income) + education, data = Prestige)
+summary(modelo2)
+```
+
+Para comparar el ajuste de este modelo respecto al anterior, podemos
+realizar un contraste empleando la función `anova()`:
+
+```{r }
+anova(modelo, modelo2)
+```
+
+Alternativamente podríamos emplear bootstrap, aunque si se quieren reescalar los 
+residuos de un modelo `gam`, como no implementan un método `hatvalues()`, 
+habrá que emplear `influence.gam()` (o directamente `modelo.gam$hat`).
+
+---
+
+Contrastar si el efecto de `income` es lineal mediante bootstrap residual, 
+empleando como estadístico el incremento en la variabilidad residual con el 
+modelo reducido (modelo lineal), $\tilde F = (RSS_0 - RSS)/RSS$, y remuestreando 
+los residuos (reescalados preferiblemente) del modelo completo (modelo aditivo).
+Aproximar el nivel crítico del contraste y el valor que tendría que
+superar el estadístico para rechazar $H_0$ con un nivel de significación
+$\alpha = 0.1$.
+
+Primero reescalamos los residuos. Como no podemos usar `hatvalues()` hacemos una
+función que los calcule: 
+```{r}
+#función para reescalar los residuos
+res_reescalados <- function(residuos, hat) {
+  sres <- residuos/sqrt(1 - hat)
+  sres <- sres - mean(sres)
+  return(sres)
+}
+```
+
+A continuación la usamos para calcular los residuos del modelo
+```{r}
+pres.dat <- Prestige
+pres.dat$sres <- res_reescalados(residuos = residuals(modelo2), hat = modelo2$hat)
+```
+
+Definimos una función que dados dos modelos calcula 
+
+$$\tilde F =\frac{RSS_0 - RSS}{RSS}$$
+```{r}
+f_resdif <- function(modeloGrande, modeloPequeño) {
+  RSS_0 <- sum(residuals(modeloPequeño)^2)
+  RSS <- sum(residuals(modeloGrande)^2)
+  (RSS_0 - RSS)/RSS
+}
+```
+
+La usamos dentro de la siguiente función que es la que vamos a remuestrear, generando así dos modelos en cada remuestra:
+```{r}
+f_statistic <- function(data, i) {
+  data$prestige <- mean(data$prestige) + data$sres[i]
+  mod_lm <- lm(prestige ~ income + education, data = data)
+  mod_gam <- gam(prestige ~ s(income) + education, data = data)
+  
+  f_resdif(mod_gam, mod_lm)
+}
+```
+Y a continuación realizamos bootstrap: 
+```{r}
+library(boot)
+set.seed(20)
+mod.boot2 <- boot(data = pres.dat, statistic = f_statistic, R = 1000)
+summary(mod.boot2)
+```
+Representando los valores obtenidos: 
+```{r}
+hist(mod.boot2$t, breaks = "FD", freq = FALSE)
+lines(density(mod.boot2$t), 
+      col = "red", 
+      lwd = 2)
+```
+Donde se observa un problema de efecto frontera al usar density.
+Para aproximar el nivel crítico del contraste usamos el siguiente código:
+```{r}
+pval <- mean(mod.boot2$t >= summary(modelo)$fstatistic[1])
+pval
+```
+La aproximación del valor que el estadístico tendría que superar para que se rechace la hipotesis nula (efecto lineal de income) con un nivel de significación de 0.1 corresponde con el valor que deja a la izquierda un 10% de los 1000 estadisticos $\tilde F^*$
+```{r}
+quantile(mod.boot2$t, 0.9)
+```
